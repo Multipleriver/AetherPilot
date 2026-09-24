@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AetherPilot schematic.apply v1",
+  "description": "Structural contract. The Python validator additionally checks grids, name uniqueness, net references, connectivity, collision and simulation semantics.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "operation", "target", "instances", "nets", "pins", "wires"],
+  "properties": {
+    "schema_version": {"const": 1, "type": "integer"},
+    "operation": {"const": "schematic.apply"},
+    "mode": {"enum": ["create", "modify"], "default": "create"},
+    "grid": {"type": "number", "minimum": 0.000001, "default": 0.0625},
+    "target": {"$ref": "#/$defs/target"},
+    "instances": {"type": "array", "minItems": 1, "maxItems": 10000, "items": {"$ref": "#/$defs/instance"}},
+    "nets": {"type": "array", "minItems": 1, "maxItems": 10000, "uniqueItems": true, "items": {"$ref": "#/$defs/signal"}},
+    "pins": {"type": "array", "maxItems": 10000, "items": {"$ref": "#/$defs/pin"}},
+    "port_order": {"type": "array", "maxItems": 10000, "uniqueItems": true, "items": {"$ref": "#/$defs/signal"}},
+    "wires": {"type": "array", "maxItems": 10000, "items": {"$ref": "#/$defs/wire"}},
+    "labels": {"type": "array", "maxItems": 1000, "items": {"$ref": "#/$defs/label"}},
+    "inherited_connections": {"type": "array", "maxItems": 1000, "items": {"$ref": "#/$defs/inherited_connection"}},
+    "simulation": {"$ref": "#/$defs/simulation"}
+  },
+  "$defs": {
+    "name": {"type": "string", "pattern": "^[A-Za-z0-9_]{1,80}$", "not": {"pattern": "^AP(stage|backup)_"}},
+    "signal": {"type": "string", "minLength": 1, "maxLength": 4096, "description": "Bounded scalar, bus, slice, or bundle; canonicalized and checked by the signal parser."},
+    "parameter": {"oneOf": [{"$ref": "#/$defs/number"}, {"type": "boolean"}, {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_ .-]{0,255}$"}]},
+    "point": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number", "minimum": -1000000, "maximum": 1000000}},
+    "orientation": {"enum": ["R0", "R90", "R180", "R270", "MX", "MY", "MXR90", "MYR90"], "default": "R0"},
+    "number": {"oneOf": [{"type": "number"}, {"type": "string", "pattern": "^[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?(?:meg|[TGMKkmunpf])?$"}]},
+    "target": {
+      "type": "object", "additionalProperties": false, "required": ["library", "cell", "technology"],
+      "properties": {"library": {"$ref": "#/$defs/name"}, "cell": {"$ref": "#/$defs/name"}, "technology": {"const": "018um_PDK"}, "view": {"const": "schematic", "default": "schematic"}}
+    },
+    "master": {
+      "type": "object", "additionalProperties": false, "required": ["library", "cell"],
+      "properties": {"library": {"$ref": "#/$defs/name"}, "cell": {"$ref": "#/$defs/name"}, "view": {"$ref": "#/$defs/name", "default": "symbol"}}
+    },
+    "instance": {
+      "type": "object", "additionalProperties": false, "required": ["name", "master", "origin", "parameters", "connections"],
+      "properties": {
+        "name": {"$ref": "#/$defs/signal"}, "master": {"$ref": "#/$defs/master"}, "origin": {"$ref": "#/$defs/point"}, "orientation": {"$ref": "#/$defs/orientation"},
+        "parameters": {"type": "object", "propertyNames": {"$ref": "#/$defs/name"}, "additionalProperties": {"$ref": "#/$defs/parameter"}},
+        "connections": {"type": "object", "minProperties": 1, "propertyNames": {"$ref": "#/$defs/signal"}, "additionalProperties": {"$ref": "#/$defs/signal"}}
+      }
+    },
+    "pin": {
+      "type": "object", "additionalProperties": false, "required": ["name", "net", "direction", "position"],
+      "properties": {"name": {"$ref": "#/$defs/signal"}, "net": {"$ref": "#/$defs/signal"}, "direction": {"enum": ["input", "output", "inputOutput"]}, "position": {"$ref": "#/$defs/point"}, "orientation": {"$ref": "#/$defs/orientation"}}
+    },
+    "wire": {
+      "type": "object", "additionalProperties": false, "required": ["net", "points"],
+      "properties": {"net": {"$ref": "#/$defs/signal"}, "points": {"type": "array", "minItems": 2, "maxItems": 1000, "items": {"$ref": "#/$defs/point"}}}
+    },
+    "label": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "text", "origin", "orientation", "height", "layer", "purpose", "justification", "font"],
+      "properties": {
+        "kind": {"enum": ["label", "note", "wire_name"]}, "text": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "origin": {"$ref": "#/$defs/point"}, "orientation": {"$ref": "#/$defs/orientation"},
+        "height": {"type": "number", "exclusiveMinimum": 0}, "layer": {"type": "string", "minLength": 1},
+        "purpose": {"type": "string", "minLength": 1}, "justification": {"type": "string", "minLength": 1},
+        "font": {"type": "string", "minLength": 1}, "properties": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/property"}}, "net": {"$ref": "#/$defs/signal"}
+      }
+    },
+    "property": {
+      "type": "object", "additionalProperties": false, "required": ["name", "value"],
+      "properties": {
+        "name": {"$ref": "#/$defs/name"},
+        "value": {"oneOf": [{"type": "string", "maxLength": 4096}, {"type": "number"}, {"type": "boolean"}]},
+        "type": {"type": "string", "minLength": 1, "maxLength": 80},
+        "isNetSet": {"const": false, "description": "Reserved for instance netSet bindings; annotation netSet properties are rejected by the native contract."}
+      }
+    },
+    "inherited_connection": {
+      "type": "object", "additionalProperties": false, "required": ["property", "default", "pin"],
+      "properties": {"property": {"$ref": "#/$defs/name"}, "default": {"$ref": "#/$defs/signal"}, "pin": {"$ref": "#/$defs/signal"}}
+    },
+    "simulation": {
+      "type": "object", "additionalProperties": false, "required": ["backend", "analysis", "ground", "sources", "device_models", "signals"],
+      "properties": {
+        "backend": {"const": "alps"}, "ground": {"$ref": "#/$defs/name"}, "temperature": {"type": "number", "default": 27},
+        "analysis": {
+          "type": "object", "additionalProperties": false, "required": ["type", "source", "start", "stop", "step"],
+          "properties": {"type": {"const": "dc"}, "source": {"$ref": "#/$defs/name"}, "start": {"type": "number"}, "stop": {"type": "number"}, "step": {"type": "number", "exclusiveMinimum": 0}}
+        },
+        "sources": {"type": "array", "minItems": 1, "maxItems": 10000, "items": {"$ref": "#/$defs/source"}},
+        "signals": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/name"}},
+        "device_models": {"type": "object", "minProperties": 1, "propertyNames": {"$ref": "#/$defs/name"}, "additionalProperties": {"$ref": "#/$defs/model"}},
+        "assertions": {"type": "array", "items": {"$ref": "#/$defs/assertion"}},
+        "monte_carlo": {"$ref": "#/$defs/monte_carlo"}
+      }
+    },
+    "source": {
+      "type": "object", "additionalProperties": false, "required": ["name", "positive", "negative", "dc"],
+      "properties": {"name": {"allOf": [{"$ref": "#/$defs/name"}, {"pattern": "^V"}]}, "positive": {"$ref": "#/$defs/name"}, "negative": {"$ref": "#/$defs/name"}, "dc": {"type": "number"}}
+    },
+    "model": {
+      "type": "object", "additionalProperties": false, "required": ["model", "terminals", "parameters"],
+      "properties": {
+        "model": {"$ref": "#/$defs/name"}, "terminals": {"const": ["D", "G", "S", "B"]},
+        "parameters": {"type": "object", "additionalProperties": false, "required": ["l", "w"], "properties": {"l": {"$ref": "#/$defs/name"}, "w": {"$ref": "#/$defs/name"}, "m": {"$ref": "#/$defs/name"}, "nf": {"$ref": "#/$defs/name"}}}
+      }
+    },
+    "assertion": {
+      "type": "object", "additionalProperties": false, "required": ["signal", "at", "min", "max"],
+      "properties": {"signal": {"$ref": "#/$defs/name"}, "at": {"type": "number"}, "min": {"type": "number"}, "max": {"type": "number"}}
+    },
+    "monte_carlo": {
+      "type": "object", "additionalProperties": false, "required": ["samples", "seed", "variables"],
+      "properties": {
+        "samples": {"type": "integer", "minimum": 2, "maximum": 200},
+        "seed": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "min_pass_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "variables": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"$ref": "#/$defs/monte_carlo_variable"}}
+      }
+    },
+    "monte_carlo_variable": {
+      "type": "object", "additionalProperties": false, "required": ["instance", "parameter", "distribution"],
+      "properties": {
+        "instance": {"$ref": "#/$defs/name"}, "parameter": {"$ref": "#/$defs/name"},
+        "distribution": {"enum": ["normal", "uniform"]},
+        "sigma": {"$ref": "#/$defs/number"}, "low": {"$ref": "#/$defs/number"}, "high": {"$ref": "#/$defs/number"}
+      },
+      "allOf": [
+        {"if": {"properties": {"distribution": {"const": "normal"}}}, "then": {"required": ["sigma"], "not": {"required": ["low", "high"]}}},
+        {"if": {"properties": {"distribution": {"const": "uniform"}}}, "then": {"required": ["low", "high"], "not": {"required": ["sigma"]}}}
+      ]
+    }
+  }
+}

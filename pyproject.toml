@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aetherpilot"
+version = "0.1.0"
+description = "Structured, verifiable EDA data workflows with optional backends"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+aetherpilot = "aetherpilot.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["aetherpilot*"]
+
+[tool.setuptools.package-data]
+aetherpilot = ["schemas/*.json"]

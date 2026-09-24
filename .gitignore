@@ -1,0 +1,61 @@
+# Private project context and local runtime data
+/reservation/
+/AGENTS.md
+
+# Proprietary installers, documentation, PDKs, and lab data
+/resources/
+/artifacts/
+
+# Local execution logs
+/.codex-runs/
+
+# Internal handoffs and acceptance records
+# Existing documents require public sanitization before release
+/docs/*
+!/docs/deployment.md
+
+# Local secrets and machine-specific environment files
+.env
+.env.*
+!.env.example
+/scripts/aether-2026.03.env.bash
+/scripts/start-local-license.sh
+/scripts/activate-aether-license.sh
+/scripts/migrate_comparator_crosspdk.py
+/scripts/run-native-acceptance-matrix.sh
+
+# Current examples are tied to private PDKs, models, or local workspaces
+/examples/
+
+# Native/vendor acceptance and private synthetic evidence
+/tests/native/
+/tests/fixtures/reviewer/
+
+# Keep only the four backend-independent unit-test modules for the public tree
+/tests/*
+!/tests/__init__.py
+!/tests/test_parameters.py
+!/tests/test_results.py
+!/tests/test_signals.py
+!/tests/test_backend.py
+!/tests/test_public_surface.py
+
+# All Python implementation files are public source; private values belong in
+# the user-supplied config and backend environment, never in this repository.
+
+# Python-generated files
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+/build/
+/dist/
+/.aether_log/
+/lib.defs
+/.aetherpilot/
+
+# Root-level EDA/simulator scratch output
+/0.csv
+/IN.csv
+/VV1:p.csv
+/display.drf

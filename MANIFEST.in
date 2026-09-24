@@ -1,0 +1,15 @@
+include README.md
+include LICENSE
+include config.example.json
+include scripts/reproduce_review.py
+include scripts/run-unit-tests.sh
+prune docs
+include docs/deployment.md
+prune examples
+prune tests
+include tests/__init__.py
+include tests/test_parameters.py
+include tests/test_results.py
+include tests/test_signals.py
+include tests/test_backend.py
+include tests/test_public_surface.py

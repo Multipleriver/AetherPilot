@@ -1,0 +1,17 @@
+{
+  "backend": "auto",
+  "env_file": "./backend.env",
+  "workspace": "./workspace",
+  "artifact_root": "./artifacts",
+  "pdk_root": "./pdk",
+  "technology_library": "",
+  "timeout_seconds": 120,
+  "simulator_timeout_seconds": 120,
+  "monte_carlo_timeout_seconds": 600,
+  "snapshot_interval_seconds": 30,
+  "snapshot_retention_count": 20,
+  "snapshot_retention_hours": 24,
+  "snapshot_quota_bytes": 10737418240,
+  "screenshot": false,
+  "model_libraries": []
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AetherPilot OperationResult v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "ok", "operation_id", "operation", "stage", "changes", "readback", "metrics", "artifacts", "warnings", "errors"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "operation_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "operation": {"type": "string"},
+    "stage": {"type": "string"},
+    "changes": {"type": "array", "items": {"type": "object"}},
+    "readback": {"type": "object"},
+    "metrics": {"type": "object"},
+    "artifacts": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["category", "stage", "code", "message", "details"],
+        "properties": {
+          "category": {"enum": ["PreflightError", "SessionError", "OperationError", "ValidationError", "SimulationError", "ArtifactError"]},
+          "stage": {"type": "string"}, "code": {"type": "string"}, "message": {"type": "string"}, "details": {"type": "object"}
+        }
+      }
+    }
+  },
+  "allOf": [{"if": {"properties": {"ok": {"const": true}}}, "then": {"properties": {"stage": {"const": "complete"}, "errors": {"maxItems": 0}}}}]
+}
