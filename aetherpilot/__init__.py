@@ -82,6 +82,51 @@ def read_schematic(target, *, recursive=True, max_depth=20, include_geometry=Tru
     )
 
 
+def capture_image(target, *, config=None):
+    """Capture a PNG image of a saved design view into the evidence bundle."""
+    from .harness import Harness
+
+    return Harness(config).capture_image(target)
+
+
+def render_report(run_operation, output, *, config=None):
+    """Render a self-contained HTML evidence report for a completed run operation."""
+    from .harness import Harness
+
+    return Harness(config).render_report(run_operation, output)
+
+
+def lint_schematic(target=None, *, plan=None, style="analog_default", config=None):
+    """Lint a native schematic target or an offline plan against a named style rule set."""
+    from .harness import Harness
+
+    return Harness(config).lint_schematic(target, plan=plan, style=style)
+
+
+def recreate_schematic(target, new_cell, *, wire_policy=None, config=None):
+    """Recreate a saved flat schematic on a clean style grid as a new cell."""
+    from .harness import Harness
+
+    values = {"wire_policy": wire_policy} if wire_policy else {}
+    return Harness(config).recreate_schematic(target, new_cell, **values)
+
+
+def compose_structured(target, *, structure="ota5", roles=None, description=None, via=None, from_cell=None, config=None):
+    """Compose a recipe-driven structured layout (ota5/inverter/mirror2/tgate) as a new cell."""
+    from .harness import Harness
+
+    values = {}
+    if roles:
+        values["roles"] = roles
+    if description is not None:
+        values["description"] = description
+    if via is not None:
+        values["via"] = via
+    if from_cell is not None:
+        values["from_cell"] = from_cell
+    return Harness(config).compose_structured(target, structure=structure, **values)
+
+
 def review(readback, *, op=None, result=None, intent=None, source=None, netlist=None, config=None):
     """Run the bounded read-only Design Reviewer on saved facts."""
     from .harness import Harness
@@ -96,20 +141,21 @@ def review_files(readback_path, *, op_path=None, intent_path=None, netlist_path=
     return Harness(config).review_files(readback_path, op_path=op_path, intent_path=intent_path, netlist_path=netlist_path)
 
 
-def natural_language_plan(description, *, target, grid=0.0625, constraints=None, routing=None, config=None):
+def natural_language_plan(description, *, target, grid=0.0625, constraints=None, routing=None, style=None, config=None):
     """Compile a bounded natural-language circuit description to schematic IR."""
     from .harness import Harness
 
     return Harness(config).natural_language_plan(description, target=target, grid=grid,
-                                                  constraints=constraints, routing=routing)
+                                                  constraints=constraints, routing=routing, style=style)
 
 
-def natural_language_apply(description, *, target, grid=0.0625, constraints=None, routing=None, config=None):
+def natural_language_apply(description, *, target, grid=0.0625, constraints=None, routing=None, style=None, wire_policy=None, config=None):
     """Compile a bounded description and create a new native schematic."""
     from .harness import Harness
 
+    values = {"wire_policy": wire_policy} if wire_policy else {}
     return Harness(config).natural_language_apply(description, target=target, grid=grid,
-                                                   constraints=constraints, routing=routing)
+                                                   constraints=constraints, routing=routing, style=style, **values)
 
 
 def maestro_action(target, action, *, runtime_options=None, attached_api=None, config=None, **values):

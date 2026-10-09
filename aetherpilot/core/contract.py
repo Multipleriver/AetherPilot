@@ -19,7 +19,7 @@ from ..errors import ValidationError
 
 
 NAME = re.compile(r"^[A-Za-z0-9_]{1,80}$")
-NUMBER = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?(?:meg|[TGMKkmunpf])?$")
+NUMBER = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?(?:meg|[TGMKkmunpfxg])?$")
 ORIENTATIONS = {"R0", "R90", "R180", "R270", "MX", "MY", "MXR90", "MYR90"}
 
 
@@ -141,11 +141,11 @@ def numeric_text(value, where):
 
 def engineering(value):
     text = numeric_text(value, "parameter")
-    match = re.search(r"(meg|[TGMKkmunpf])$", text)
+    match = re.search(r"(meg|[TGMKkmunpfxg])$", text)
     factor = 1.0
     if match:
-        factor = {"T": 1e12, "G": 1e9, "M": 1e-3, "meg": 1e6, "K": 1e3, "k": 1e3,
-                  "m": 1e-3, "u": 1e-6, "n": 1e-9, "p": 1e-12, "f": 1e-15}[match.group()]
+        factor = {"T": 1e12, "G": 1e9, "g": 1e9, "M": 1e-3, "meg": 1e6, "K": 1e3, "k": 1e3,
+                  "m": 1e-3, "u": 1e-6, "n": 1e-9, "p": 1e-12, "f": 1e-15, "x": 1e6}[match.group()]
         text = text[:match.start()]
     result = float(text) * factor
     if not math.isfinite(result):

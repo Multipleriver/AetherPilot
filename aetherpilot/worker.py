@@ -21,6 +21,51 @@ from aetherpilot.snapshots import SnapshotStore
 from aetherpilot.native_tools import native_tool_environment
 
 
+def _compose_topology_mismatch(template, verify):
+    """Compose verification: strict master/connection/pin/net/port-order equality
+    plus declared-parameter containment.
+
+    The native database materializes full CDF defaults on save; the compose
+    contract is that every parameter the plan declares is present and equal in
+    the readback, while tool-added defaults are not topology changes.
+    """
+    from aetherpilot.style import normalized_instance_parameters
+
+    diff = {}
+    t_instances = {item["name"]: item for item in template["instances"]}
+    v_instances = {item["name"]: item for item in verify["instances"]}
+    if set(t_instances) != set(v_instances):
+        diff["instances"] = {"only_template": sorted(set(t_instances) - set(v_instances)),
+                             "only_readback": sorted(set(v_instances) - set(t_instances))}
+    for name in sorted(set(t_instances) & set(v_instances)):
+        if t_instances[name].get("master") != v_instances[name].get("master"):
+            diff.setdefault("masters", {})[name] = {"template": t_instances[name].get("master"),
+                                                    "readback": v_instances[name].get("master")}
+        if t_instances[name].get("connections") != v_instances[name].get("connections"):
+            diff.setdefault("connections", {})[name] = {"template": t_instances[name].get("connections"),
+                                                        "readback": v_instances[name].get("connections")}
+        declared = normalized_instance_parameters(t_instances[name].get("parameters", {}))
+        actual = v_instances[name].get("parameters", {})
+        bad = {key: {"declared": value, "readback": actual.get(key)} for key, value in declared.items() if actual.get(key) != value}
+        if bad:
+            diff.setdefault("parameters", {})[name] = bad
+    t_pins = {item["name"]: item for item in template["pins"]}
+    v_pins = {item["name"]: item for item in verify["pins"]}
+    if set(t_pins) != set(v_pins):
+        diff["pins"] = {"only_template": sorted(set(t_pins) - set(v_pins)), "only_readback": sorted(set(v_pins) - set(t_pins))}
+    for name in sorted(set(t_pins) & set(v_pins)):
+        bad = {key: {"template": t_pins[name].get(key), "readback": v_pins[name].get(key)}
+               for key in ("net", "direction") if t_pins[name].get(key) != v_pins[name].get(key)}
+        if bad:
+            diff.setdefault("pin_fields", {})[name] = bad
+    if set(template["nets"]) != set(verify["nets"]):
+        diff["nets"] = {"only_template": sorted(set(template["nets"]) - set(verify["nets"])),
+                        "only_readback": sorted(set(verify["nets"]) - set(template["nets"]))}
+    if template.get("port_order") and template.get("port_order") != verify.get("port_order"):
+        diff["port_order"] = {"template": template.get("port_order"), "readback": verify.get("port_order")}
+    return diff
+
+
 def dispatch(api, request, artifacts, result, *, owned):
     adapter = PyAetherAdapter(api, artifacts, result, owned=owned)
     operation = request["operation"]
@@ -320,7 +365,52 @@ def dispatch(api, request, artifacts, result, *, owned):
         # library.  A future native transaction can consume this exact IR.
         artifacts.write("hierarchical-netlist-import.json", parsed)
         if source.get("materialize"):
-            raise OperationError("Native hierarchical materialization is gated: child symbol generation and atomic multi-cell publication are not certified", stage="netlist", code="native_materialization_unavailable", details={"plans": len(parsed["plans"]), "root": parsed["root"]})
+            from aetherpilot.cells import CellOps
+            from aetherpilot.placement import place_schematic, placed_geometry
+            from aetherpilot.routing import route_schematic
+            from aetherpilot.style import apply_net_renames, label_internal_nets, pin_lead_wires, power_stub_nets, semantic_net_renames
+
+            # Child-first materialization: apply each plan, then generate the
+            # child's symbol so later parents can resolve its terminal
+            # geometry.  Any failure deletes the cells created so far.
+            cells = CellOps(api)
+            created = []
+            try:
+                for plan in parsed["plans"]:
+                    plan = {key: value for key, value in plan.items() if key != "hierarchy_instances"}
+                    plan = apply_net_renames(plan, semantic_net_renames(plan))
+                    cell_target = plan["target"]
+                    placed = place_schematic(plan, [], style="analog_default")
+                    masters = adapter.schematic.master_geometry(placed["plan"])
+                    artifacts.write("master-geometry-" + cell_target["cell"] + ".json", masters)
+                    contacts, obstacles = placed_geometry(placed["plan"], masters)
+                    routed = route_schematic(placed["plan"], contacts, obstacles, max_expansions=1000000, timeout_seconds=60)
+                    routed["plan"] = label_internal_nets(routed["plan"])
+                    if source.get("wire_policy") == "labeled_power":
+                        routed["plan"] = power_stub_nets(routed["plan"], contacts)
+                    routed["plan"] = pin_lead_wires(routed["plan"])
+                    routed["plan"] = validate_plan(routed["plan"])
+                    artifacts.write("materialized-plan-" + cell_target["cell"] + ".json", routed["plan"])
+                    adapter.stage("schematic")
+                    adapter.apply(routed["plan"])
+                    created.append(cell_target)
+                    if cell_target["cell"] != parsed["root_target"]["cell"]:
+                        symbol_value = adapter.symbol.generate_from_schematic_isolated(
+                            {**cell_target, "view": "symbol"}, owner=result["operation_id"],
+                            report=artifacts.path / ("symbol-check-" + cell_target["cell"] + ".txt"),
+                            schematic_view="schematic", symbol_view="symbol")
+                        artifacts.write("symbol-" + cell_target["cell"] + ".json", symbol_value)
+            except Exception:
+                for cell_target in reversed(created):
+                    try:
+                        inventory = cells.inspect({**cell_target, "view": "layout"})
+                        cells.delete({**cell_target, "view": "layout"}, inventory_sha256=inventory["inventory_sha256"],
+                                     approved=True, artifacts=artifacts, result=result)
+                    except Exception:
+                        pass
+                raise
+            parsed["materialization"] = {"supported": True, "cells": [item["cell"] for item in created], "verified": "apply_and_symbol_readback"}
+            result["changes"].append({"type": "hierarchical_netlist_materialized", "cells": [item["cell"] for item in created]})
         result["readback"] = parsed
         result["changes"].append({"type": "hierarchical_netlist_parsed", "root": parsed["root"], "plan_count": len(parsed["plans"]),
                                    "native_materialization": parsed["materialization"]})
@@ -445,16 +535,28 @@ def dispatch(api, request, artifacts, result, *, owned):
                 if adapter.library.exists(target):
                     raise OperationError("Natural-language target already exists; choose a new cell", stage="ownership", code="target_exists")
                 constraints = [] if constraints is None else constraints
-            placed = place_schematic(compiled["plan"], constraints) if compiled.get("requires_planning") or constraints_supplied else {"plan": compiled["plan"], "constraints": [], "routing_required": False}
+            placed = place_schematic(compiled["plan"], constraints, style=source.get("style")) if compiled.get("requires_planning") or constraints_supplied else {"plan": compiled["plan"], "constraints": [], "routing_required": False}
             adapter.preflight(placed["plan"])
             artifacts.write("placed-schematic.json", placed)
+            contacts = None
             if compiled.get("requires_planning") or (operation == "natural-language.apply" and source.get("routing")):
                 masters = adapter.schematic.master_geometry(placed["plan"])
                 contacts, obstacles = placed_geometry(placed["plan"], masters)
                 artifacts.write("master-geometry.json", masters)
-                routed = route_schematic(placed["plan"], contacts, obstacles, **source.get("routing", {}))
+                routed = route_schematic(placed["plan"], contacts, obstacles, **{"max_expansions": 1000000, "timeout_seconds": 60, **source.get("routing", {})})
             else:
                 routed = {"plan": placed["plan"], "metrics": {}, "topology_sha256": None}
+            if operation == "natural-language.apply":
+                from aetherpilot.style import label_internal_nets, pin_lead_wires, power_stub_nets
+
+                routed["plan"] = label_internal_nets(routed["plan"])
+                if source.get("wire_policy") == "labeled_power":
+                    if contacts is None:
+                        masters = adapter.schematic.master_geometry(placed["plan"])
+                        contacts, _obstacles = placed_geometry(placed["plan"], masters)
+                    routed["plan"] = power_stub_nets(routed["plan"], contacts)
+                routed["plan"] = pin_lead_wires(routed["plan"])
+                routed["plan"] = validate_plan(routed["plan"])
             artifacts.write("planned-schematic.json", routed["plan"])
             if operation == "natural-language.apply":
                 adapter.stage("schematic")
@@ -474,7 +576,7 @@ def dispatch(api, request, artifacts, result, *, owned):
         from aetherpilot.routing import route_schematic
 
         source = request["source"]
-        placed = place_schematic(source["plan"], source["constraints"])
+        placed = place_schematic(source["plan"], source["constraints"], style=source.get("style"))
         adapter.preflight(placed["plan"])
         masters = adapter.schematic.master_geometry(placed["plan"])
         contacts, obstacles = placed_geometry(placed["plan"], masters)
@@ -554,6 +656,164 @@ def dispatch(api, request, artifacts, result, *, owned):
         result["readback"] = method(plan, plan["target"], result["operation_id"], artifacts.path / "symbol-check-report.txt")
         artifacts.write("symbol-readback.json", result["readback"])
         result["changes"].append({"type": "symbol_applied", "target": plan["target"]})
+    elif operation == "design.capture_image":
+        target = request["target"]
+        adapter.preflight()
+        if not adapter.library.exists(target):
+            raise OperationError("Capture target does not exist", stage="read", code="target_missing")
+        result["readback"] = adapter.screenshot(target, strict=True)
+        artifacts.write("capture-image.json", result["readback"])
+    elif operation == "schematic.lint":
+        target = request["target"]
+        adapter.preflight()
+        if not adapter.library.exists(target):
+            raise OperationError("Lint target does not exist", stage="read", code="target_missing")
+        adapter.stage("read")
+        actual = adapter.schematic.read(target, None)
+        from aetherpilot.style import lint_schematic
+
+        report = lint_schematic(actual, style=request.get("source", {}).get("style", "analog_default"))
+        artifacts.write("lint.json", report)
+        result["readback"] = report
+        if not report["ok"]:
+            result["errors"].append({"category": "ValidationError", "stage": "lint", "code": "style_violations",
+                                     "message": "Schematic violates style rules", "details": {"violations": report["summary"]["violations"]}})
+            result["stage"] = "lint"
+    elif operation == "schematic.compose_structured":
+        from aetherpilot.contract import digest as _digest
+        from aetherpilot.errors import ValidationError
+        from aetherpilot.layout_recipes import RECIPES, REFERENCE_DESCRIPTIONS, compose_structured, recipe_lint_waivers
+        from aetherpilot.layout_geometry import layout_metrics
+        from aetherpilot.natural_language import natural_language_to_plan
+        from aetherpilot.placement import topology
+        from aetherpilot.style import lint_schematic, normalized_instance_parameters, pin_lead_wires
+
+        target = {**request["target"], "view": "schematic"}
+        source = request["source"]
+        recipe = source.get("structure", "ota5")
+        if recipe not in RECIPES:
+            raise ValidationError("Unknown structure recipe", stage="plan", code="unsupported_structure",
+                                  details={"recipe": recipe, "known": sorted(RECIPES)})
+        adapter.preflight()
+        if adapter.library.exists(target):
+            raise OperationError("Compose target already exists; choose a new cell", stage="ownership", code="target_exists")
+        via = source.get("via")
+        if via is not None and (via != "groups" or recipe != "ota5"):
+            raise ValidationError("Group composition is currently wired for the ota5 recipe only", stage="plan",
+                                  code="unsupported_structure", details={"via": via, "recipe": recipe})
+        from_cell = source.get("from_cell")
+        if from_cell is not None:
+            if not isinstance(from_cell, dict) or not isinstance(from_cell.get("library"), str) or not isinstance(from_cell.get("cell"), str):
+                raise ValidationError("from_cell needs library and cell", stage="plan", code="invalid_compose_input")
+            adapter.stage("read")
+            template = adapter.schematic.read({**from_cell, "view": "schematic"}, None)
+            artifacts.write("compose-source-readback.json", template)
+        else:
+            description = source.get("description") or REFERENCE_DESCRIPTIONS[recipe]
+            template = natural_language_to_plan(description, target={"library": target["library"], "cell": target["cell"]},
+                                                grid=target.get("grid", 0.0625))["plan"]
+        masters = adapter.schematic.master_geometry(template)
+        artifacts.write("master-geometry.json", masters)
+        if via == "groups":
+            from aetherpilot.layout_recipes import compose_ota5_groups
+
+            composed = compose_ota5_groups(template, masters, target=target, structure=source.get("roles"))
+        else:
+            composed = compose_structured(template, masters, target=target, recipe=recipe, structure=source.get("roles"))
+        plan = validate_plan(pin_lead_wires(composed["plan"]))
+        artifacts.write("compose-roles.json", composed["roles"])
+        artifacts.write("composed-plan.json", plan)
+        metrics = {"before": layout_metrics(template, masters), "H": composed["H"]}
+        artifacts.write("layout-metrics-before.json", metrics["before"])
+
+        def _canon(projected):
+            projected["instances"] = sorted(projected["instances"], key=lambda item: item["name"])
+            projected["pins"] = sorted(projected["pins"], key=lambda item: item["name"])
+            for item in projected["instances"]:
+                item["parameters"] = normalized_instance_parameters(item.get("parameters", {}))
+            return _digest(projected)
+
+        original = _canon(topology({"instances": template["instances"], "pins": template["pins"], "nets": template["nets"],
+                                    **({"port_order": template["port_order"]} if template.get("port_order") else {})}))
+        if _canon(topology(plan)) != original:
+            raise OperationError("Composed topology differs from the certified template", stage="plan", code="compose_topology_mismatch")
+        adapter.stage("schematic")
+        actual = adapter.apply(plan)
+        if request["options"].get("screenshot", True):
+            adapter.screenshot(target)
+        verify = adapter.schematic.read(target, None)
+        artifacts.write("compose-verify-readback.json", verify)
+        mismatch = _compose_topology_mismatch(template, verify)
+        if mismatch:
+            raise OperationError("Composed cell failed topology readback verification", stage="readback",
+                                 code="compose_topology_mismatch", details={"mismatch": mismatch})
+        lint = lint_schematic(verify, masters=masters, waivers=recipe_lint_waivers(recipe))
+        artifacts.write("lint.json", lint)
+        metrics["after"] = layout_metrics(verify, masters)
+        artifacts.write("layout-metrics.json", metrics)
+        artifacts.write("compose-interface.json", composed["interface"])
+        result["readback"] = {"created": target, "structure": recipe, "via": via or "monolithic", "topology_preserved": True,
+                              "lint_ok": lint["ok"], "lint": lint, "metrics": metrics,
+                              "roles": composed["roles"], "diagnostics": composed["diagnostics"],
+                              "interface": composed["interface"]}
+        result["changes"].append({"type": "design_created", "target": target})
+    elif operation == "schematic.recreate":
+        from aetherpilot.contract import digest as _digest
+        from aetherpilot.placement import placed_geometry, topology
+        from aetherpilot.routing import route_schematic
+        from aetherpilot.style import label_internal_nets, lint_schematic, map_to_grid, normalized_instance_parameters, pin_lead_wires, power_stub_nets
+
+        target = request["target"]
+        source = request["source"]
+        adapter.preflight()
+        if not adapter.library.exists(target):
+            raise OperationError("Recreate source does not exist", stage="read", code="target_missing")
+        new_target = {"library": target["library"], "cell": source["cell"], "view": "schematic"}
+        if adapter.library.exists(new_target):
+            raise OperationError("Recreate destination already exists; choose a new cell", stage="ownership", code="target_exists")
+        adapter.stage("read")
+        actual = adapter.schematic.read(target, None)
+        if actual.get("records"):
+            raise OperationError("Recreate currently accepts flat schematics only", stage="read", code="hierarchical_unsupported")
+        artifacts.write("recreate-source-readback.json", actual)
+
+        def _canon(projected):
+            projected["instances"] = sorted(projected["instances"], key=lambda item: item["name"])
+            projected["pins"] = sorted(projected["pins"], key=lambda item: item["name"])
+            for item in projected["instances"]:
+                item["parameters"] = normalized_instance_parameters(item.get("parameters", {}))
+            return _digest(projected)
+
+        plan = map_to_grid(actual, target=new_target)
+        artifacts.write("recreated-plan.json", plan)
+        original = _canon(topology({"instances": actual["instances"], "pins": actual["pins"], "nets": actual["nets"],
+                                    **({"port_order": actual["port_order"]} if actual.get("port_order") else {})}))
+        if _canon(topology(plan)) != original:
+            raise OperationError("Recreated topology differs from the source design", stage="plan", code="recreate_topology_mismatch")
+        adapter.stage("schematic")
+        masters = adapter.schematic.master_geometry(plan)
+        contacts, obstacles = placed_geometry(plan, masters)
+        artifacts.write("master-geometry.json", masters)
+        routed = route_schematic(plan, contacts, obstacles, **{"max_expansions": 1000000, "timeout_seconds": 60, **(source.get("routing") or {})})
+        routed["plan"] = label_internal_nets(routed["plan"])
+        if source.get("wire_policy") == "labeled_power":
+            routed["plan"] = power_stub_nets(routed["plan"], contacts)
+        routed["plan"] = pin_lead_wires(routed["plan"])
+        routed["plan"] = validate_plan(routed["plan"])
+        artifacts.write("recreated-routed.json", routed["plan"])
+        created = adapter.apply(routed["plan"])
+        if request["options"].get("screenshot", True):
+            adapter.screenshot(new_target)
+        verify = adapter.schematic.read(new_target, None)
+        verify_projection = {"instances": verify["instances"], "pins": verify["pins"], "nets": verify["nets"]}
+        if verify.get("port_order"):
+            verify_projection["port_order"] = verify["port_order"]
+        if _canon(topology(verify_projection)) != original:
+            raise OperationError("Recreated cell failed topology readback verification", stage="readback", code="recreate_topology_mismatch")
+        lint = lint_schematic(verify)
+        artifacts.write("lint.json", lint)
+        result["readback"] = {"source": target, "created": new_target, "topology_preserved": True, "lint_ok": lint["ok"], "lint": lint}
+        result["changes"].append({"type": "design_created", "target": new_target})
     elif operation == "schematic.smoke":
         target = request["target"]
         adapter.preflight()
@@ -575,8 +835,8 @@ def dispatch(api, request, artifacts, result, *, owned):
         artifacts.write("readback.json", actual)
     else:
         raise OperationError("Unsupported operation", stage="plan", code="unsupported_operation")
-    result["ok"] = True
-    result["stage"] = "complete"
+    result["ok"] = not result["errors"]
+    result["stage"] = "complete" if result["ok"] else result["stage"]
     return result
 
 

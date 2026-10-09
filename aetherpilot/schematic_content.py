@@ -10,7 +10,7 @@ def schematic_content(readback):
         if isinstance(value, list):
             return [normalized(item) for item in value if not isinstance(item, dict) or not str(item.get("name", "")).startswith("aetherpilot_")]
         if isinstance(value, dict):
-            return {key: normalized(item) for key, item in value.items() if key not in {"wire_id", "label_id", "text_id", "figure_id", "parameter_provenance"} and not key.startswith("aetherpilot_")}
+            return {key: normalized(item) for key, item in value.items() if key not in {"wire_id", "label_id", "text_id", "figure_id", "parameter_provenance", "connection_expressions"} and not key.startswith("aetherpilot_")}
         return value
 
     inherited = []

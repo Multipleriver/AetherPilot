@@ -1359,10 +1359,12 @@ class PyAetherAdapter:
             raise
         return actual
 
-    def screenshot(self, target):
+    def screenshot(self, target, *, strict=False):
         if not self.owned:
+            if strict:
+                raise OperationError("Image capture requires an owned worker process", stage="screenshot", code="capture_requires_owned_process")
             self.result["warnings"].append("Screenshot skipped: user-owned GUI state is not changed.")
-            return
+            return None
         self.stage("screenshot")
         opened = False
         try:
@@ -1377,14 +1379,26 @@ class PyAetherAdapter:
             for iteration in range(5):
                 QApplication.processEvents()
             directory = self.artifacts.path / "screenshots"
-            directory.mkdir(mode=0o700)
+            directory.mkdir(mode=0o700, exist_ok=True)
             first, second = design.listBbox
             box = (first[0] - 0.5, first[1] - 0.5, second[0] + 0.5, second[1] + 0.5)
             self.api.aeSaveCart(design, bbox=box, width=1200, height=1000, path=str(directory) + "/")
-            if not any(path.stat().st_size > 100 for path in directory.rglob("*.png")):
+            images = sorted(path for path in directory.rglob("*.png") if path.stat().st_size > 100)
+            if not images:
+                if strict:
+                    raise OperationError("Native screenshot produced no usable image", stage="screenshot", code="screenshot_unavailable")
                 self.result["warnings"].append("Native screenshot unavailable; database evidence remains authoritative.")
-        except Exception:
+                return None
+            return {"target": target, "screenshots": [{"file": str(path.relative_to(self.artifacts.path)), "bytes": path.stat().st_size,
+                                                       "sha256": file_digest(path)} for path in images]}
+        except Exception as exc:
+            if strict:
+                if isinstance(exc, OperationError):
+                    raise
+                raise OperationError("Native screenshot failed; see private native logs.", stage="screenshot", code="screenshot_unavailable",
+                                     details={"exception": type(exc).__name__}) from exc
             self.result["warnings"].append("Native screenshot failed; see private native logs.")
+            return None
         finally:
             if opened:
                 self.api.aeCloseDesign()

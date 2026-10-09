@@ -30,9 +30,9 @@ class PublicSurfaceTests(unittest.TestCase):
             aetherpilot.export_native_netlist(target, output_dir="private", netlist_format="hspice")
             native.export_native_netlist.assert_called_once_with(target, output_dir="private", model_libraries=None, temperature=27, netlist_format="hspice")
             aetherpilot.natural_language_apply("CMOS inverter", target=target, constraints=[])
-            native.natural_language_apply.assert_called_once_with("CMOS inverter", target=target, grid=0.0625, constraints=[], routing=None)
+            native.natural_language_apply.assert_called_once_with("CMOS inverter", target=target, grid=0.0625, constraints=[], routing=None, style=None)
             aetherpilot.natural_language_plan("CMOS inverter", target=target, constraints=[])
-            native.natural_language_plan.assert_called_once_with("CMOS inverter", target=target, grid=0.0625, constraints=[], routing=None)
+            native.natural_language_plan.assert_called_once_with("CMOS inverter", target=target, grid=0.0625, constraints=[], routing=None, style=None)
             manifest = {"schema_version": 1}
             aetherpilot.migrate_netlist("source.sp", target, manifest, approved=True, materialize=True)
             native.migrate_netlist.assert_called_once_with("source.sp", target, manifest, approved=True, materialize=True)

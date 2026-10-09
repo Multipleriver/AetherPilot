@@ -25,6 +25,14 @@ class ParameterTests(unittest.TestCase):
     def test_bounded_functions(self):
         self.assertEqual(resolve_parameter("value", {"value": "max(abs(-2), sqrt(9))+min(1, 5)"})["value"], 4)
 
+    def test_alps_engineering_suffixes(self):
+        from aetherpilot.contract import engineering
+
+        self.assertAlmostEqual(engineering("251.1886431510x"), 251.1886431510e6)
+        self.assertAlmostEqual(engineering("1.0000000000g"), 1e9)
+        self.assertAlmostEqual(engineering("-163.2074478976n"), -163.2074478976e-9)
+        self.assertAlmostEqual(engineering("198.4f"), 198.4e-15)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -206,6 +206,7 @@ def parser():
     natural.add_argument("--cell", required=True)
     natural.add_argument("--technology", default="018um_PDK")
     natural.add_argument("--constraints", type=Path)
+    natural.add_argument("--style", default=None, choices=["analog_default"], help="derive soft placement style rules for generic grammar")
     natural_apply = commands.add_parser("natural-apply", parents=[common])
     natural_apply.add_argument("description", nargs="?")
     natural_apply.add_argument("--description-file", type=Path)
@@ -213,6 +214,8 @@ def parser():
     natural_apply.add_argument("--cell", required=True)
     natural_apply.add_argument("--technology", default="018um_PDK")
     natural_apply.add_argument("--constraints", type=Path)
+    natural_apply.add_argument("--style", default=None, choices=["analog_default"], help="derive soft placement style rules for generic grammar")
+    natural_apply.add_argument("--wire-policy", choices=("wired", "labeled_power"), default=None, dest="wire_policy", help="labeled_power: power nets become labeled terminal stubs instead of long rails")
     normalize_waveform = commands.add_parser("waveform-normalize", parents=[common])
     normalize_waveform.add_argument("input", type=Path)
     normalize_waveform.add_argument("--analysis", required=True)
@@ -244,6 +247,45 @@ def parser():
         child.add_argument("--max-depth", type=int, default=20)
         child.add_argument("--no-recursive", action="store_true")
         child.add_argument("--view-configuration", type=Path)
+    capture_image = commands.add_parser("capture-image", parents=[common], help="capture a PNG image of a saved design view")
+    capture_image.add_argument("--library", required=True)
+    capture_image.add_argument("--cell", required=True)
+    capture_image.add_argument("--view", default="schematic", choices=("schematic", "symbol", "layout"))
+    report = commands.add_parser("report", parents=[common], help="render a self-contained HTML evidence report for a completed run")
+    report.add_argument("--run-operation", required=True, help="completed operation id whose artifacts feed the report")
+    report.add_argument("--output", type=Path, required=True, help="new HTML output path (never overwritten)")
+    lint = commands.add_parser("lint", parents=[common], help="lint a schematic (native target or offline plan) against the analog_default style rules")
+    lint.add_argument("--library")
+    lint.add_argument("--cell")
+    lint.add_argument("--view", default="schematic")
+    lint.add_argument("--style", default="analog_default")
+    lint.add_argument("--plan", type=Path, help="lint a plan JSON offline instead of a native target")
+    recreate = commands.add_parser("recreate", parents=[common], help="recreate a saved flat schematic on a clean style grid as a new cell")
+    recreate.add_argument("--library", required=True)
+    recreate.add_argument("--cell", required=True)
+    recreate.add_argument("--new-cell", required=True, dest="new_cell")
+    recreate.add_argument("--wire-policy", choices=("wired", "labeled_power"), default=None, dest="wire_policy")
+    compose = commands.add_parser("compose-ota5", parents=[common], help="compose the certified OTA5 topology into a compact role-driven layout as a new cell")
+    compose.add_argument("--library", required=True)
+    compose.add_argument("--cell", required=True, help="new cell name (must not exist)")
+    compose.add_argument("--roles", type=Path, default=None, help="explicit role-map JSON override (validated fail-closed)")
+    compose_any = commands.add_parser("compose", parents=[common], help="compose a recipe-driven structured layout (ota5/inverter/mirror2/tgate) as a new cell")
+    compose_any.add_argument("--library", required=True)
+    compose_any.add_argument("--cell", required=True, help="new cell name (must not exist)")
+    compose_any.add_argument("--structure", default="ota5", help="recipe name (default ota5)")
+    compose_any.add_argument("--roles", type=Path, default=None, help="explicit role-map JSON override (validated fail-closed)")
+    compose_any.add_argument("--description", type=Path, default=None, help="natural-language source description file (default: the recipe reference topology)")
+    compose_any.add_argument("--via", choices=("groups",), default=None, help="ota5 only: compose as linked groups instead of the monolithic recipe")
+    compose_any.add_argument("--from-library", default=None, dest="from_library", help="read the source topology from this library's cell instead of a description")
+    compose_any.add_argument("--from-cell", default=None, dest="from_cell", help="source cell name (requires --from-library)")
+    commands.add_parser("mcp", parents=[common], help="serve a read-only MCP stdio server until stdin closes")
+    docs_index = commands.add_parser("docs-index", parents=[common], help="build a local offline documentation index")
+    docs_index.add_argument("--root", action="append", required=True, help="documentation root directory (repeatable)")
+    docs_index.add_argument("--db", type=Path, required=True, help="index database path (atomically replaced)")
+    docs_search = commands.add_parser("docs-search", parents=[common], help="search a previously built documentation index")
+    docs_search.add_argument("query")
+    docs_search.add_argument("--db", type=Path, required=True)
+    docs_search.add_argument("--limit", type=int, default=10)
     review = commands.add_parser("review", parents=[common], help="read-only structural/operating-point review")
     review.add_argument("--readback", type=Path, help="saved readback/result JSON")
     review.add_argument("--library", help="read a saved schematic from Aether before reviewing")
@@ -289,6 +331,12 @@ def main(argv=None):
     try:
         if args.command == "capabilities":
             result = capabilities(getattr(args, "config", None))
+        elif args.command == "mcp":
+            import sys
+
+            from .mcp_server import serve
+
+            return serve(sys.stdin, sys.stdout, config=getattr(args, "config", None))
         elif args.command in {"backend-status", "backend"}:
             result = backend_status(getattr(args, "config", None))
         elif args.command == "schema":
@@ -422,13 +470,13 @@ def main(argv=None):
                     raise ValidationError("Provide exactly one natural-language description source", stage="plan", code="invalid_input")
                 description = args.description_file.read_text(encoding="utf-8") if args.description_file else args.description
                 constraints = _read_json(args.constraints) if args.constraints else None
-                result = harness.natural_language_plan(description, target={"library": args.library, "cell": args.cell, "technology": args.technology}, constraints=constraints)
+                result = harness.natural_language_plan(description, target={"library": args.library, "cell": args.cell, "technology": args.technology}, constraints=constraints, style=args.style)
             elif args.command == "natural-apply":
                 if bool(args.description) == bool(args.description_file):
                     raise ValidationError("Provide exactly one natural-language description source", stage="plan", code="invalid_input")
                 description = args.description_file.read_text(encoding="utf-8") if args.description_file else args.description
                 constraints = _read_json(args.constraints) if args.constraints else None
-                result = harness.natural_language_apply(description, target={"library": args.library, "cell": args.cell, "technology": args.technology}, constraints=constraints)
+                result = harness.natural_language_apply(description, target={"library": args.library, "cell": args.cell, "technology": args.technology}, constraints=constraints, style=args.style, wire_policy=args.wire_policy)
             elif args.command == "netlist-export-native":
                 result = harness.export_native_netlist({"library": args.library, "cell": args.cell, "view": args.view}, output_dir=args.output_dir, temperature=args.temperature, netlist_format=args.format)
             elif args.command == "schematic-plan":
@@ -443,6 +491,33 @@ def main(argv=None):
             elif args.command == "read":
                 result = harness.read({"library": args.library, "cell": args.cell, "view": args.view}, recursive=not args.no_recursive, max_depth=args.max_depth,
                                       configuration=_read_json(args.view_configuration) if args.view_configuration else None)
+            elif args.command == "capture-image":
+                result = harness.capture_image({"library": args.library, "cell": args.cell, "view": args.view})
+            elif args.command == "report":
+                result = harness.render_report(args.run_operation, args.output)
+            elif args.command == "docs-index":
+                from .docsearch import build_index
+
+                result = {"ok": True, "readback": build_index(args.root, args.db)}
+            elif args.command == "docs-search":
+                from .docsearch import search
+
+                result = {"ok": True, "readback": search(args.db, args.query, limit=args.limit)}
+            elif args.command == "lint":
+                plan = _read_json(args.plan) if args.plan else None
+                target = {"library": args.library, "cell": args.cell, "view": args.view} if args.library and args.cell else None
+                result = harness.lint_schematic(target, plan=plan, style=args.style)
+            elif args.command == "recreate":
+                result = harness.recreate_schematic({"library": args.library, "cell": args.cell}, args.new_cell, wire_policy=args.wire_policy)
+            elif args.command == "compose-ota5":
+                roles = _read_json(args.roles) if args.roles else None
+                result = harness.compose_structured({"library": args.library, "cell": args.cell}, roles=roles)
+            elif args.command == "compose":
+                roles = _read_json(args.roles) if args.roles else None
+                description = args.description.read_text(encoding="utf-8") if args.description else None
+                from_cell = {"library": args.from_library, "cell": args.from_cell} if args.from_cell else None
+                result = harness.compose_structured({"library": args.library, "cell": args.cell}, structure=args.structure,
+                                                    roles=roles, description=description, via=args.via, from_cell=from_cell)
             elif args.command == "review":
                 if args.readback is not None:
                     result = harness.review_files(args.readback, op_path=args.op, intent_path=args.intent, netlist_path=args.netlist)

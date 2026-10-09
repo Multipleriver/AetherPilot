@@ -75,8 +75,12 @@ def topology(plan):
             "pins": [{key: item[key] for key in ("name", "net", "direction")} for item in plan["pins"]], "nets": plan["nets"]}
 
 
-def place_schematic(source, constraints):
+def place_schematic(source, constraints, *, style=None):
     plan = validate_plan(source)
+    if style is not None:
+        from .style import style_constraints
+
+        constraints = style_constraints(plan, style=style) + list(constraints or [])
     if len(plan["instances"]) + len(plan["pins"]) > 2000 or not isinstance(constraints, list) or len(constraints) > 2000:
         raise ValidationError("Placement exceeds the local constraint budget", stage="plan", code="resource_limit")
     original_topology = digest(topology(plan))

@@ -268,6 +268,24 @@ def project_schematic_edit(before, plan, masters=None):
                         text["bbox"] = [[point[axis] + offset[axis] for axis in (0, 1)] for point in text["bbox"]]
             for net in current["nets_detail"]:
                 net["terminals"] = [{"name": pin["name"], "direction": pin["direction"]} for pin in current["pins"] if pin["net"] == net["name"]]
+    for change in plan["changes"]:
+        if change["type"] != "connection.compose":
+            continue
+        for terminal, expression in change["value"].get("connections", {}).items():
+            if not isinstance(expression, str) or len(expand_signal(expression)) <= 1:
+                continue
+            instance = next((item for item in current["instances"] if item["name"] == change["target"]), None)
+            records = (instance or {}).get("terminal_geometry", {}).get(terminal) or []
+            if not records:
+                raise ValidationError("Vector compose needs the terminal's native geometry", stage="plan", code="terminal_mismatch")
+            center = [float(value) for value in records[0]["world_center"]]
+            same_net = [point for wire in current["wires"] if wire.get("net") == expression for point in wire.get("points", [])]
+            current["wires"] = list(current["wires"]) + [{"net": expression, "points": [list(point) for point in _compose_stub_points(same_net, center)]}]
+        attached = {net for item in current["instances"] for net in item.get("connections", {}).values()}
+        attached |= {pin.get("net") for pin in current.get("pins", [])}
+        attached |= {wire.get("net") for wire in current.get("wires", [])}
+        current["nets"] = [net for net in current.get("nets", []) if net in attached]
+        current["nets_detail"] = [detail for detail in current.get("nets_detail", []) if detail.get("name") in attached]
     routing_plan = {"nets": current["nets"], "pins": current["pins"], "wires": current["wires"]}
     contacts = [(item["connections"][terminal], tuple(records[0]["world_center"]), item["name"] + ":" + terminal)
                 for item in current["instances"] for terminal, records in item.get("terminal_geometry", {}).items()
@@ -299,6 +317,9 @@ def edit_comparison_content(readback, changes, *, native=False):
     changed_masters = set()
     replaces_labels = any(change["type"] == "label.replace" for change in changes)
     replaces_wires = any(change["type"] == "wire.replace" for change in changes)
+    vector_nets = {expression for change in changes if change["type"] == "connection.compose"
+                   for expression in change["value"].get("connections", {}).values()
+                   if isinstance(expression, str) and len(expand_signal(expression)) > 1}
     for change in changes:
         if change["type"] == "instance.set_parameter":
             updated_parameters.setdefault(change["target"], set()).add(change["value"]["name"])
@@ -391,6 +412,14 @@ def edit_comparison_content(readback, changes, *, native=False):
         # comparison separately runs compile_wires on the actual readback,
         # so semantic fields remain strict while segmentation is normalized.
         content["wires"] = []
+    if vector_nets:
+        # Vector compose binds bus terminals by a labeled stub wire.  The stub
+        # and its wire_name label are generated geometry with native-chosen
+        # segmentation, so they are excluded from content comparison; the
+        # terminal's connection (the bus expression) is still compared.
+        content["wires"] = [wire for wire in content.get("wires", []) if wire.get("net") not in vector_nets]
+        content["texts"] = [text for text in content.get("texts", []) if text.get("net") not in vector_nets]
+        content["labels"] = [label for label in content.get("labels", []) if label.get("net") not in vector_nets]
     return content
 
 
@@ -421,6 +450,26 @@ def validate_connection_composition(readback, instance, connections, *, expected
             "value": {"connections": normalized, "expected_widths": dict(expected_widths)},
             "expressions": expressions, "native_scalar_only": any(item["width"] != 1 for item in expressions.values()),
             "publish_policy": "native_readback_required"}
+
+
+def _compose_stub_points(same_net_points, origin):
+    """Route a vector-compose stub from the terminal to the nearest same-net wire point."""
+    origin = (float(origin[0]), float(origin[1]))
+    if not same_net_points:
+        return [origin, (origin[0] + 0.25, origin[1])]
+    nearest = min(same_net_points, key=lambda point: (abs(point[0] - origin[0]) + abs(point[1] - origin[1]), point))
+    corner = (origin[0], nearest[1])
+    points = [nearest]
+    if corner != nearest:
+        points.append(corner)
+    if origin != corner:
+        points.append(origin)
+    return points
+
+
+def _compose_stub_label_origin(points):
+    first, second = points[0], points[1] if len(points) > 1 else points[0]
+    return [round((first[0] + second[0]) / 2, 9), round((first[1] + second[1]) / 2, 9)]
 
 
 def execute_schematic_edits(backend, design, plan):
@@ -462,7 +511,43 @@ def execute_schematic_edits(backend, design, plan):
                     # retained in the readback metadata by the projection gate.
                     requested_bits = expand_signal(requested_net)
                     if len(requested_bits) != 1:
-                        raise ValidationError("Native connection composition needs a scalar terminal occurrence", stage="schematic", code="native_composition_unavailable")
+                        bases = {bit.split("<")[0] for bit in requested_bits}
+                        if len(bases) != 1:
+                            raise ValidationError("Native vector composition needs a single bus base", stage="schematic", code="native_composition_unavailable")
+                        # Bus terminals bind by name: create a labeled stub wire
+                        # carrying the canonical vector expression (plain
+                        # instTerm.addToNet silently no-ops on multi-bit terminals).
+                        pins = list(getattr(terminal, "pins", []) or [])
+                        figures = list(getattr(pins[0], "figs", []) or []) if pins else []
+                        if figures:
+                            origin = tuple(float(value) for value in figures[0].origin)
+                        else:
+                            # Vector terminals carry no pin figures; take the terminal's
+                            # world position from the live readback instead.
+                            live = backend.read({"library": str(design.libName), "cell": str(design.cellName), "view": str(design.viewName)})
+                            record = next(item for item in live["instances"] if item["name"] == target)
+                            geometry = record.get("terminal_geometry", {}).get(str(terminal.name)) or []
+                            if not geometry:
+                                raise ValidationError("Vector composition needs the terminal's native geometry", stage="schematic", code="ambiguous_selection")
+                            origin = tuple(float(value) for value in geometry[0]["world_center"])
+                        same_net = []
+                        for shape in design.shapes:
+                            if str(getattr(shape, "objType", "")).casefold() != "line":
+                                continue
+                            wire_net = getattr(shape, "net", None)
+                            if wire_net is not None and str(wire_net.name) == requested_net:
+                                same_net.extend([tuple(float(coordinate) for coordinate in position) for position in shape.points])
+                        points = _compose_stub_points(same_net, origin)
+                        stub = require(api.dbCrtSchWire(design, points), "dbCrtSchWire", "schematic")
+                        wire = list(stub)[0]
+                        bus_net = nets.get(requested_net)
+                        if bus_net is None:
+                            bus_net = require(api.dbCrtNet(design, requested_net), "dbCrtNet", "schematic")
+                            nets[requested_net] = bus_net
+                        wire.addToNet(bus_net)
+                        require(api.dbAddFigToNet(wire, bus_net), "dbAddFigToNet", "schematic")
+                        require(api.dbCrtSchWireName(design, wire, requested_net, _compose_stub_label_origin(points), 0.0625, "roman", "lowerLeft", 6, False, "R0", False), "dbCrtSchWireName", "schematic")
+                        continue
                     requested_net = requested_bits[0]
                     if current_net is not None and str(current_net.name) == requested_net:
                         continue

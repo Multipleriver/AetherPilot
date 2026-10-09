@@ -29,6 +29,7 @@ class RuntimeConfig:
     timeout_seconds: float = 120
     simulator_timeout_seconds: float = 120
     monte_carlo_timeout_seconds: float = 600
+    simulation_concurrency: int = 1
     model_libraries: list = field(default_factory=list)
     screenshot: bool = True
     snapshot_root: Optional[Path] = None
@@ -67,6 +68,8 @@ class RuntimeConfig:
                     raise ValueError("Invalid resource budget")
             if type(self.screenshot) is not bool or not isinstance(self.model_libraries, list):
                 raise ValueError("Invalid options")
+            if type(self.simulation_concurrency) is not int or not 1 <= self.simulation_concurrency <= 8:
+                raise ValueError("Invalid simulation concurrency")
         except (ValueError, TypeError) as exc:
             raise PreflightError("Invalid runtime configuration", stage="preflight", code="invalid_config") from exc
 
@@ -126,6 +129,7 @@ class RuntimeConfig:
     def worker_options(self):
         return {"backend": self.backend, "technology_library": self.technology_library, "pdk_root": str(self.pdk_root), "max_operation_bytes": self.max_operation_bytes, "max_worker_rss_mb": self.max_worker_rss_mb,
                 "min_free_memory_mb": self.min_free_memory_mb, "model_libraries": self.model_libraries, "simulator_timeout_seconds": self.simulator_timeout_seconds, "monte_carlo_timeout_seconds": self.monte_carlo_timeout_seconds, "screenshot": self.screenshot,
+                "simulation_concurrency": self.simulation_concurrency,
                 "snapshot_root": str(self.snapshot_root), "snapshot_interval_seconds": self.snapshot_interval_seconds,
                 "snapshot_retention_count": self.snapshot_retention_count, "snapshot_retention_hours": self.snapshot_retention_hours,
                 "snapshot_quota_bytes": self.snapshot_quota_bytes}

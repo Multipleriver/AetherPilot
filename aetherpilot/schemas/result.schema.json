@@ -21,7 +21,7 @@
         "type": "object", "additionalProperties": false,
         "required": ["category", "stage", "code", "message", "details"],
         "properties": {
-          "category": {"enum": ["PreflightError", "SessionError", "OperationError", "ValidationError", "SimulationError", "ArtifactError"]},
+          "category": {"enum": ["PreflightError", "BackendUnavailableError", "SessionError", "OperationError", "ValidationError", "SimulationError", "ArtifactError"]},
           "stage": {"type": "string"}, "code": {"type": "string"}, "message": {"type": "string"}, "details": {"type": "object"}
         }
       }

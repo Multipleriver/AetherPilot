@@ -127,22 +127,59 @@ class ExperimentRunner:
         self.artifacts.write("experiment/cases.json", cases)
         executable = Path(os.environ["ALPS_ROOT"]) / "bin" / "alps"
         deadline = time.monotonic() + self.options.get("monte_carlo_timeout_seconds", 600)
+        concurrency = self.options.get("simulation_concurrency", 1)
+        if type(concurrency) is not int:
+            concurrency = 1
+        concurrency = max(1, min(concurrency, 8))
+        fatal_codes = {"license", "timeout", "models_missing", "simulator_missing", "native_model_variation_unavailable",
+                       "native_mc_identity_mismatch", "native_mc_evidence_invalid", "model_snapshot_changed"}
+
+        def run_guarded(case):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SimulationError("Experiment exceeded its total deadline", stage="simulation", code="timeout")
+            return self._run_case(case, readback, root, includes, models, executable, min(remaining, self.options["simulator_timeout_seconds"]))
+
         outcomes = []
         fatal = None
-        for case in cases:
-            try:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise SimulationError("Experiment exceeded its total deadline", stage="simulation", code="timeout")
-                outcomes.append(self._run_case(case, readback, root, includes, models, executable, min(remaining, self.options["simulator_timeout_seconds"])))
-            except HarnessError as exc:
-                outcomes.append({"index": case["index"], "condition": case["condition"], "sample": case["sample"], "ok": False, "error": exc.to_dict()})
+        if concurrency > 1 and len(cases) > 1:
+            from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+
+            with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="experiment-case") as pool:
+                pending = iter(cases)
+                in_flight = {}
+                for _ in range(min(concurrency, len(cases))):
+                    case = next(pending)
+                    in_flight[pool.submit(run_guarded, case)] = case
+                while in_flight:
+                    done, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        case = in_flight.pop(future)
+                        try:
+                            outcome = future.result()
+                        except HarnessError as exc:
+                            outcome = {"index": case["index"], "condition": case["condition"], "sample": case["sample"], "ok": False, "error": exc.to_dict()}
+                            if exc.code in fatal_codes:
+                                fatal = exc
+                        outcomes.append(outcome)
+                        outcomes.sort(key=lambda item: item["index"])
+                        self.artifacts.write("experiment/outcomes.json", outcomes)
+                    while fatal is None and len(in_flight) < concurrency:
+                        case = next(pending, None)
+                        if case is None:
+                            break
+                        in_flight[pool.submit(run_guarded, case)] = case
+        else:
+            for case in cases:
+                try:
+                    outcomes.append(run_guarded(case))
+                except HarnessError as exc:
+                    outcomes.append({"index": case["index"], "condition": case["condition"], "sample": case["sample"], "ok": False, "error": exc.to_dict()})
+                    self.artifacts.write("experiment/outcomes.json", outcomes)
+                    if exc.code in fatal_codes:
+                        fatal = exc
+                        break
                 self.artifacts.write("experiment/outcomes.json", outcomes)
-                if exc.code in {"license", "timeout", "models_missing", "simulator_missing", "native_model_variation_unavailable",
-                                "native_mc_identity_mismatch", "native_mc_evidence_invalid", "model_snapshot_changed"}:
-                    fatal = exc
-                    break
-            self.artifacts.write("experiment/outcomes.json", outcomes)
         good = [outcome for outcome in outcomes if outcome["ok"]]
         statistics_by_condition = {}
         for condition in setup["conditions"]:
@@ -151,7 +188,7 @@ class ExperimentRunner:
                 statistics_by_condition[condition["name"]] = {column: {statistic: summarize_values([outcome["metrics"]["columns"][column][statistic] for outcome in selected]) for statistic in ("min", "max", "first", "last")} for column in selected[0]["metrics"]["columns"]}
         success_rate = len(good) / len(cases)
         result = {"analysis": setup["analysis"]["type"], "runs_requested": len(cases), "runs_completed": len(outcomes), "runs_succeeded": len(good),
-                  "runs_failed": len(outcomes) - len(good), "success_rate": success_rate, "concurrency": 1,
+                  "runs_failed": len(outcomes) - len(good), "success_rate": success_rate, "concurrency": concurrency,
                   "runs_not_started": len(cases) - len(outcomes), "aborted": fatal is not None,
                   "abort_reason": fatal.to_dict() if fatal else None,
                   "monte_carlo_kind": setup.get("monte_carlo", {}).get("kind"), "seed": setup.get("monte_carlo", {}).get("seed"),

@@ -157,8 +157,14 @@ def route_schematic(source, contacts, obstacles=(), *, margin=16, clearance=0, m
                 remaining.remove(start)
 
     initial_occupied = dict(occupied)
+    names = sorted(terminals)
     orders = [tuple(sorted(terminals, key=lambda name: (-len(terminals[name]), name))),
-              tuple(sorted(terminals, key=lambda name: (len(terminals[name]), name))), tuple(sorted(terminals))]
+              tuple(sorted(terminals, key=lambda name: (len(terminals[name]), name))), tuple(names)]
+    # Beyond the three base orders, try one deterministic order per net with
+    # that net routed first; greedy single-plane routing is order-sensitive and
+    # a walled-in net often succeeds when it goes first.
+    for name in names:
+        orders.append((name,) + tuple(item for item in names if item != name))
     attempted = []
     last_error = None
     while orders and len(attempted) < max_attempts:
@@ -178,7 +184,9 @@ def route_schematic(source, contacts, obstacles=(), *, margin=16, clearance=0, m
             last_error = error
             failed_net = error.details.get("net")
             if failed_net:
-                orders.append((failed_net,) + tuple(net for net in order if net != failed_net))
+                # Failed-net-first refinements take priority over the static
+                # per-net-first tail; the attempted-set keeps this acyclic.
+                orders.insert(1, (failed_net,) + tuple(net for net in order if net != failed_net))
     else:
         raise ValidationError("Bounded deterministic routing orders exhausted", stage="plan", code="routing_failed",
                               details={"attempts": len(attempted), "last_failure": last_error.details if last_error else {}, "proof_of_unroutability": False})

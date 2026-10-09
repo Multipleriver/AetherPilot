@@ -84,13 +84,15 @@ def _load_devices(pdk_root: Path) -> tuple[dict[str, dict[str, Any]], dict[str, 
     return by_cell, by_prefix
 
 
-def _parse_params(tokens: list[str], start: int) -> dict[str, str]:
+def _parse_params(tokens: list[str], start: int, aliases: dict[str, str] | None = None) -> dict[str, str]:
     params: dict[str, str] = {}
     for token in tokens[start:]:
         if token.count("=") != 1:
             raise ValidationError("Netlist parameter assignment is malformed", stage="netlist", code="netlist_parse")
         name, raw = token.split("=", 1)
         identifier(name, "netlist parameter")
+        if aliases:
+            name = aliases.get(name.casefold(), name)
         if name in params:
             raise ValidationError("Netlist contains repeated parameter assignments", stage="netlist", code="netlist_duplicate_parameter")
         params[name] = parameter_literal(raw, name)
@@ -126,7 +128,8 @@ def _primitive(tokens: list[str], pdk_root: Path, devices: tuple[dict[str, dict[
     body_model = tokens[terminal_count + 1]
     if body_model.casefold() not in by_cell and body_model.casefold() not in _ALIASES:
         raise ValidationError("Primitive model is not in the certified PDK", stage="netlist", code="unsupported_device")
-    params = _parse_params(tokens, terminal_count + 2)
+    aliases = {formatting[:-2].casefold(): name for name, formatting in re.findall(r"\[@([A-Za-z_][A-Za-z0-9_]*):([^\]]+)\]", parsed["template"]) if formatting.endswith("=%")}
+    params = _parse_params(tokens, terminal_count + 2, aliases)
     return {"name": tokens[0], "kind": "primitive", "model": model,
             "master": {"library": "018um_PDK", "cell": model, "view": "symbol"},
             "terminal_order": parsed["terminals"],

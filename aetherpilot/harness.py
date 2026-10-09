@@ -67,6 +67,41 @@ class Harness:
     def read_symbol(self, target):
         return self._execute("symbol.read", target={**target, "view": target.get("view", "symbol")})
 
+    def capture_image(self, target):
+        """Capture a PNG image of a saved design view into the evidence bundle."""
+        return self._execute("design.capture_image", target={**target, "view": target.get("view", "schematic")})
+
+    def render_report(self, run_operation, output):
+        """Render a self-contained HTML evidence report for a completed run operation."""
+        return self._execute("report.render", source={"run_operation": run_operation, "output": str(output)})
+
+    def lint_schematic(self, target=None, *, plan=None, style="analog_default"):
+        """Lint a native schematic target or an offline plan against a named style rule set."""
+        source = {"style": style}
+        if plan is not None:
+            source["plan"] = plan
+        if target is not None:
+            target = {**target, "view": target.get("view", "schematic")}
+        return self._execute("schematic.lint", target=target, source=source)
+
+    def recreate_schematic(self, target, new_cell, *, wire_policy=None):
+        """Recreate a saved flat schematic on a clean style grid as a new cell."""
+        return self._execute("schematic.recreate", target={**target, "view": "schematic"},
+                             source={"cell": new_cell, **({"wire_policy": wire_policy} if wire_policy else {})})
+
+    def compose_structured(self, target, *, structure="ota5", roles=None, description=None, via=None, from_cell=None):
+        """Compose a recipe-driven structured layout (ota5/inverter/mirror2/tgate) as a new cell."""
+        source = {"structure": structure}
+        if roles:
+            source["roles"] = roles
+        if description is not None:
+            source["description"] = description
+        if via is not None:
+            source["via"] = via
+        if from_cell is not None:
+            source["from_cell"] = from_cell
+        return self._execute("schematic.compose_structured", target={**target, "view": "schematic"}, source=source)
+
     def maestro_action(self, target, action, *, runtime_options=None, attached_api=None, **values):
         """Execute one validated local Maestro-compatible action."""
         source = {"action": action, **values}
@@ -148,12 +183,12 @@ class Harness:
     def maestro_migrate_setup(self, source_target, target, *, test="imported", options=None):
         return self.maestro_action(target, "migrate_setup", source_target={**source_target, "view": source_target.get("view", "state")}, test=test, runtime_options=options)
 
-    def plan_schematic(self, plan, constraints, *, routing=None):
+    def plan_schematic(self, plan, constraints, *, routing=None, style=None):
         if isinstance(plan, (str, Path)):
             plan = json.loads(Path(plan).read_text(encoding="utf-8"), object_pairs_hook=no_duplicate_keys)
-        return self._execute("schematic.plan", source={"plan": plan, "constraints": constraints, "routing": routing or {}})
+        return self._execute("schematic.plan", source={"plan": plan, "constraints": constraints, "routing": routing or {}, "style": style})
 
-    def natural_language_plan(self, description, *, target, grid=0.0625, constraints=None, routing=None):
+    def natural_language_plan(self, description, *, target, grid=0.0625, constraints=None, routing=None, style=None):
         """Compile bounded natural language, then optionally run native planning.
 
         The compiler is itself an operation so its request, diagnostics and
@@ -162,10 +197,10 @@ class Harness:
         """
         return self._execute("natural-language.plan", source={
             "description": description, "target": dict(target), "grid": grid,
-            "constraints": constraints, "routing": routing or {},
+            "constraints": constraints, "routing": routing or {}, "style": style,
         })
 
-    def natural_language_apply(self, description, *, target, grid=0.0625, constraints=None, routing=None):
+    def natural_language_apply(self, description, *, target, grid=0.0625, constraints=None, routing=None, style=None, wire_policy=None):
         """Compile a bounded description and create a new native schematic.
 
         This is intentionally a create-only convenience operation.  Existing
@@ -174,7 +209,8 @@ class Harness:
         """
         return self._execute("natural-language.apply", source={
             "description": description, "target": dict(target), "grid": grid,
-            "constraints": constraints, "routing": routing or {},
+            "constraints": constraints, "routing": routing or {}, "style": style,
+            **({"wire_policy": wire_policy} if wire_policy else {}),
         })
 
     def prepare_change(self, plan, *, base_sha256=None, attached_api=None):
@@ -243,8 +279,10 @@ class Harness:
 
     def import_netlist(self, source, target, *, require_metadata=False, recursive=False, netlist_format="auto", materialize=False):
         """Parse a certified flat or hierarchical netlist into declarative IR."""
-        if isinstance(source, (str, Path)) and isinstance(source, Path):
+        if isinstance(source, Path):
             source = source.read_text(encoding="utf-8")
+        elif isinstance(source, str) and "\n" not in source and Path(source).expanduser().is_file():
+            source = Path(source).expanduser().read_text(encoding="utf-8")
         operation = "schematic.import_hierarchical_netlist" if recursive else "schematic.import_netlist"
         return self._execute(operation, target={**target, "view": "schematic"},
                              source={"text": source, "require_metadata": require_metadata, "netlist_format": netlist_format, "materialize": bool(materialize)})
@@ -525,12 +563,46 @@ class Harness:
                                                           source.get("approved") is not True or source.get("domain") != "schematic" or
                                                           not isinstance(source.get("publication_operation_id"), str)):
                         raise ValidationError("Recovery requires a schematic publication ID and explicit approval", stage="plan", code="approval_required")
+                    if operation == "schematic.lint":
+                        from .style import STYLES
+
+                        if not isinstance(source, dict) or source.get("style", "analog_default") not in STYLES:
+                            raise ValidationError("Unknown schematic style", stage="plan", code="invalid_style")
+                        if ("plan" in source) == (target is not None):
+                            raise ValidationError("Lint requires exactly one of a plan or a native target", stage="plan", code="invalid_lint_input")
+                    if operation == "schematic.recreate":
+                        if not isinstance(source, dict) or not set(source) <= {"cell", "routing", "wire_policy"} or not isinstance(source.get("cell"), str):
+                            raise ValidationError("Recreate requires a new cell name", stage="plan", code="invalid_recreate_input")
+                        identifier(source["cell"])
+                        if target is not None and source["cell"] == target.get("cell"):
+                            raise ValidationError("Recreate destination must differ from the source cell", stage="plan", code="invalid_recreate_input")
+                    if operation == "schematic.compose_structured":
+                        from .layout_recipes import RECIPES
+
+                        if not isinstance(source, dict) or not set(source) <= {"structure", "roles", "description", "via", "from_cell"}:
+                            raise ValidationError("Compose accepts structure, roles, description, via and from_cell only", stage="plan",
+                                                  code="invalid_compose_input")
+                        if source.get("structure", "ota5") not in RECIPES:
+                            raise ValidationError("Unknown structure recipe", stage="plan", code="unsupported_structure",
+                                                  details={"recipe": source.get("structure"), "known": sorted(RECIPES)})
+                        if source.get("roles") is not None and not isinstance(source["roles"], dict):
+                            raise ValidationError("Compose roles must be a mapping", stage="plan", code="invalid_compose_input")
+                        if source.get("description") is not None and not isinstance(source["description"], str):
+                            raise ValidationError("Compose description must be a string", stage="plan", code="invalid_compose_input")
+                        if source.get("via") is not None and source["via"] != "groups":
+                            raise ValidationError("Unknown compose path", stage="plan", code="invalid_compose_input")
+                        if source.get("from_cell") is not None and not isinstance(source["from_cell"], dict):
+                            raise ValidationError("from_cell must be a target mapping", stage="plan", code="invalid_compose_input")
+                    if source.get("wire_policy") is not None and source.get("wire_policy") not in {"wired", "labeled_power"}:
+                        raise ValidationError("Unknown wire policy", stage="plan", code="invalid_wire_policy")
                     artifacts.write("input.json", source)
                     request["source"] = source
             if target is not None:
                 for name in target.values():
                     identifier(name)
                 request["target"] = target
+            if operation == "design.capture_image" and (not isinstance(target, dict) or target.get("view") not in {"schematic", "symbol", "layout"}):
+                raise ValidationError("Image capture requires a schematic, symbol or layout view", stage="plan", code="invalid_capture_view")
             if options is not None:
                 request["options"] = options
             if operation == "design.diff":
@@ -543,7 +615,7 @@ class Harness:
                 artifacts.write("diff.json", result["readback"])
                 result["ok"] = True
                 result["stage"] = "complete"
-            elif operation == "natural-language.plan" and isinstance(source, dict) and source.get("constraints") is None and not source.get("routing"):
+            elif operation == "natural-language.plan" and isinstance(source, dict) and source.get("constraints") is None and not source.get("routing") and source.get("style") is None:
                 # The deterministic compiler is part of the public offline
                 # core.  Native geometry planning is still required for a
                 # generic device grammar when callers provide constraints or
@@ -618,6 +690,29 @@ class Harness:
                                       "pairing_status": review.get("coverage", {}).get("pairing_status", "not_requested")}
                 result["ok"] = True
                 result["stage"] = "complete"
+            elif operation == "report.render":
+                from .report import render_operation_report
+
+                if not isinstance(source, dict) or set(source) != {"run_operation", "output"}:
+                    raise ValidationError("report.render requires run_operation and output", stage="plan", code="invalid_report_input")
+                result["readback"] = render_operation_report(self.config.artifact_root, source["run_operation"], source["output"])
+                result["ok"] = True
+                result["stage"] = "complete"
+            elif operation == "schematic.lint" and isinstance(source, dict) and "plan" in source:
+                from .style import lint_schematic
+
+                try:
+                    plan = validate_plan(source["plan"])
+                except (TypeError, KeyError, ValueError, OverflowError) as exc:
+                    raise ValidationError("Malformed declarative plan", stage="plan", code="invalid_plan") from exc
+                report = lint_schematic(plan, style=source.get("style", "analog_default"))
+                result["readback"] = report
+                artifacts.write("lint.json", report)
+                result["ok"] = report["ok"]
+                result["stage"] = "complete" if report["ok"] else "lint"
+                if not report["ok"]:
+                    result["errors"].append(ValidationError("Schematic violates style rules", stage="lint", code="style_violations",
+                                                            details={"violations": report["summary"]["violations"]}).to_dict())
             elif operation == "pdk.catalog":
                 result["readback"] = catalog(self.config.pdk_root)
                 artifacts.write("pdk-catalog.json", result["readback"])
